@@ -9,9 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from fla.modules.activations import fast_gelu_impl, sigmoid, sqrelu, swish
-from fla.modules.layernorm import layer_norm
-from fla.utils import checkpoint
+from mmfreelm.modules.layernorm import layer_norm_fn
+from mmfreelm.modules.utils import checkpoint
 
 
 @checkpoint
@@ -73,22 +72,13 @@ class T2RFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        dot_dim: int = None,
-        bias: Optional[bool] = False
+        dot_dim: int = None
     ) -> T2RFeatureMap:
         super().__init__()
         # Trainable map
         if dot_dim is None:
             dot_dim = head_dim
-
-        self.head_dim = head_dim
-        self.dot_dim = dot_dim
-        self.bias = bias
-
-        self.layer = nn.Linear(head_dim, dot_dim, bias=bias)
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(head_dim={self.head_dim}, dot_dim={self.dot_dim}, bias={self.bias})"
+        self.layer = nn.Linear(head_dim, dot_dim)
 
     def forward(self, x: torch.Tensor):
         return self.layer(x).relu()
@@ -177,7 +167,7 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # Section 2.1
-        x = layer_norm(x, self.gamma, self.beta)
+        x = layer_norm_fn(x, self.gamma, self.beta)
         # first map the input to sketch size with learnable parameters
         x = self.sketches1[0](x) * self.sketches2[0](x) * self.head_dim ** -0.5
         for i in range(1, int(math.log2(self.degree)) - 1):
@@ -228,7 +218,7 @@ class RebasedFeatureMap(nn.Module):
 
     def forward(self, x: torch.Tensor, flatten: Optional[bool] = True):
         if self.use_beta and self.use_gamma and self.normalize:
-            x = layer_norm(x, self.gamma, self.beta)
+            x = layer_norm_fn(x, self.gamma, self.beta)
         elif self.normalize:
             x = F.layer_norm(x, (self.head_dim,), self.gamma, self.beta)
         elif self.use_gamma and self.use_beta:
@@ -243,58 +233,3 @@ class RebasedFeatureMap(nn.Module):
         x2_1, x2_2 = flatten_diag_outer_product_off1(x, x)
         # rebased use learnable parameters to approximate any quadratic function
         return torch.cat([x2_2 * self.head_dim ** -0.5, x2_1 * (2 / self.head_dim) ** 0.5], dim=-1)
-
-
-class ReLUFeatureMap(nn.Module):
-
-    def __init__(
-        self,
-    ) -> ReLUFeatureMap:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return F.relu(x)
-
-
-class SquaredReLUFeatureMap(nn.Module):
-
-    def __init__(
-        self,
-    ) -> SquaredReLUFeatureMap:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return sqrelu(x)
-
-
-class GELUFeatureMap(nn.Module):
-
-    def __init__(
-        self,
-    ) -> GELUFeatureMap:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return fast_gelu_impl(x)
-
-
-class SwishFeatureMap(nn.Module):
-
-    def __init__(
-        self,
-    ) -> SwishFeatureMap:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return swish(x)
-
-
-class SigmoidFeatureMap(nn.Module):
-
-    def __init__(
-        self,
-    ) -> SigmoidFeatureMap:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return sigmoid(x)
