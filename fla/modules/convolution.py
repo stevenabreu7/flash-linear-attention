@@ -4,15 +4,14 @@
 
 import math
 import warnings
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.modules.activations import ACT2FN
-from fla.utils import checkpoint
+from mmfreelm.modules.activations import ACT2FN
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -43,39 +42,6 @@ def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
         return out.to(dtype=u.dtype)
 
 
-@checkpoint
-def proj_then_conv1d(
-    x: torch.Tensor,
-    proj_weight: torch.Tensor,
-    conv1d_weight: torch.Tensor,
-    conv1d_bias: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None
-) -> torch.Tensor:
-    # We do matmul and transpose BLH -> HBL at the same time
-    x = rearrange(proj_weight @ rearrange(x, "b t d -> d (b t)"), "d (b t) -> b d t", t=x.shape[-2])
-
-    if causal_conv1d_fn is None:
-        raise ImportError("`causal_conv1d_fn` is not available. Please install `causal-conv1d` first.")
-    if cache is None:
-        x = causal_conv1d_fn(
-            x=x,
-            weight=rearrange(conv1d_weight, "d 1 w -> d w"),
-            bias=conv1d_bias,
-            activation="silu",
-        ).transpose(1, 2)
-    else:
-        assert x.shape[-1] == 1, "Only support decoding with 1 token at a time for now"
-        x = x.squeeze(-1)
-        x = causal_conv1d_update(
-            x=x,
-            weight=rearrange(conv1d_weight, "d 1 w -> d w"),
-            bias=conv1d_bias,
-            cache=cache,
-            activation="silu",
-        )
-    return x
-
-
 class ShortConvolution(nn.Conv1d):
     """
     Simple wrapper around `nn.Conv1d` that accepts dimension last.
@@ -87,16 +53,14 @@ class ShortConvolution(nn.Conv1d):
         kernel_size: int,
         bias: bool = False,
         activation: Optional[str] = 'silu',
-        use_fast_conv1d: Optional[bool] = True
+        use_causal_conv: Optional[bool] = True
     ):
-        super().__init__(
-            in_channels=hidden_size,
-            out_channels=hidden_size,
-            kernel_size=kernel_size,
-            groups=hidden_size,
-            bias=bias,
-            padding=kernel_size - 1
-        )
+        super().__init__(in_channels=hidden_size,
+                         out_channels=hidden_size,
+                         kernel_size=kernel_size,
+                         groups=hidden_size,
+                         bias=bias,
+                         padding=kernel_size - 1)
 
         self.hidden_size = hidden_size
         self.activation = None
@@ -104,19 +68,11 @@ class ShortConvolution(nn.Conv1d):
             assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
             self.activation = activation
 
-        if causal_conv1d_fn is None:
-            if use_fast_conv1d:
-                raise RuntimeError(
-                    "Please either install `causal-conv1d>=1.4.0` to enable fast causal short convolution CUDA kernel "
-                    "or set `use_fast_conv1d` to False"
-                )
-            else:
-                warnings.warn(
-                    "The naive Pytorch verison is very slow in practice, "
-                    "please run `pip install causal-conv1d>=1.4.0` to install fast causal short convolution CUDA kernel",
-                    category=ImportWarning
-                )
-        self.use_fast_conv1d = use_fast_conv1d
+        if use_causal_conv:
+            if causal_conv1d_fn is None:
+                warnings.warn("Please install `causal-conv1d` to use causal convolutions, setting `use_causal_conv` to False.")
+                use_causal_conv = False
+        self.use_causal_conv = use_causal_conv
 
     def extra_repr(self):
         s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'
@@ -135,61 +91,44 @@ class ShortConvolution(nn.Conv1d):
             s += ', padding_mode={padding_mode}'
         if self.activation is not None:
             s += ', activation={activation}'
-        if not self.use_fast_conv1d:
-            s += ', use_fast_conv1d={use_fast_conv1d}'
+        if not self.use_causal_conv:
+            s += ', use_causal_conv={use_causal_conv}'
         return s.format(**self.__dict__)
 
     def forward(
         self,
         x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        cache: Optional[torch.Tensor] = None,
-        output_final_state: bool = False,
-        seq_idx: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cache: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Args:
-            x (`torch.Tensor`):
+            x:
                 Tensor of shape `[batch_size, seq_len, hidden_size]`
-            mask (`Optional[torch.Tensor]`):
-                Attention mask dealing with padded positions.
-            cache (`Optional[torch.Tensor]`):
-                Previous cache tensor of shape `[batch_size, hidden_size, kernel_size]`.
-                If provided, the cache is updated **inplace**.
-            output_final_state (Optional[bool]):
-                Whether to output the final state of shape `[batch_size, hidden_size, kernel_size]`. Default: `False`.
-            seq_idx (Optional[torch.Tensor]):
-                Sequence index for each token. Used for varlen. Default: `None`.
-                Shape: [batch_size, seq_len]
-                Suppose a batch consists of two sequences with lengths 3 and 4, seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
+            cache:
+                Previous cache tensor of shape `[batch_size, hidden_size, kernel_size]`
         Returns:
             Tensor of shape `[batch_size, seq_len, hidden_size]`.
+            The `cache` (if provided) is updated inplace.
         """
 
-        batch_size, _, hidden_size = x.shape
-        if mask is not None:
-            x = x.mul_(mask.unsqueeze(-1))
-        if output_final_state and cache is None:
-            cache = x.new_zeros(batch_size, hidden_size, self.kernel_size[0])
+        if not next(self.parameters()).is_cuda:
+            warnings.warn("CUDA is required for using causal convolutions, setting `use_causal_conv` to False.")
+            self.use_causal_conv = False
         if cache is not None and x.shape[1] == 1:
             return self.step(x, cache)
-        x = rearrange(x, "b t d -> b d t")
-        # Update state (B D W)
-        if cache is not None:
-            cache.copy_(F.pad(x, (self.kernel_size[0] - x.shape[-1], 0)))
-        if self.use_fast_conv1d:
+        x = rearrange(x, "b l d -> b d l")
+        if self.use_causal_conv:
             x = causal_conv1d_fn(
                 x=x,
                 weight=rearrange(self.weight, "d 1 w -> d w"),
                 bias=self.bias,
                 activation=self.activation,
-                seq_idx=seq_idx,
             )
         else:
             x = self._conv_forward(x, self.weight, self.bias)[..., :x.shape[-1]]
             if self.activation is not None:
                 x = ACT2FN[self.activation](x)
-        return rearrange(x, "b d t -> b t d"), cache
+        return rearrange(x, "b d l -> b l d")
 
     def step(
         self,
@@ -199,7 +138,7 @@ class ShortConvolution(nn.Conv1d):
         assert x.shape[1] == 1, "Only support decoding with 1 token at a time for now"
 
         x = x.squeeze(1)
-        if self.use_fast_conv1d:
+        if self.use_causal_conv:
             x = causal_conv1d_update(
                 x=x,
                 conv_state=cache,
@@ -216,7 +155,7 @@ class ShortConvolution(nn.Conv1d):
                 x = x + self.bias
             if self.activation is not None:
                 x = ACT2FN[self.activation](x).to(dtype=dtype)
-        return x.unsqueeze(1), cache
+        return x.unsqueeze(1)
 
     @property
     def state_size(self) -> int:
@@ -226,38 +165,38 @@ class ShortConvolution(nn.Conv1d):
 class LongConvolution(nn.Module):
     """
     LongConvolution applies a convolution operation on the input tensor using a fixed
-    filter of length max_len.
+    filter of length l_max.
     The filter is learned during training and is applied using FFT convolution.
     Args:
         hidden_size (int): The number of expected features in the input and output.
-        max_len (int): The maximum sequence length.
+        l_max (int): The maximum sequence length.
     Returns:
-        y: [batch_size, seq_len, hidden_size] tensor
+        y: (b, l, d) tensor
     """
 
     def __init__(
         self,
         hidden_size: int,
-        max_len: int,
+        l_max: int,
         **kwargs,
     ):
         """
         Initializes the LongConvolution module.
         Args:
             hidden_size (int): The number of expected features in the input and output.
-            max_len (int): The maximum sequence length.
+            l_max (int): The maximum sequence length.
         """
         super().__init__()
         self.hidden_size = hidden_size
-        self.filter = nn.Parameter(torch.randn(self.hidden_size, max_len), requires_grad=True)
+        self.filter = nn.Parameter(torch.randn(self.hidden_size, l_max), requires_grad=True)
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         """
         Applies the LongConvolution operation on the input tensor.
         Args:
-            x: [batch_size, seq_len, hidden_size] tensor
+            x: (b, l, d) tensor
         Returns:
-            y: [batch_size, seq_len, hidden_size] tensor
+            y: (b, l, d) tensor
         """
         x = x.transpose(1, 2)
         y = fft_conv(x, self.filter, dropout_mask=None, gelu=False)
@@ -296,7 +235,7 @@ class ImplicitLongConvolution(nn.Module):
     Args:
         hidden_size (int):
             The number of expected features in the input and output.
-        max_len (int):
+        l_max (int):
             The maximum sequence length.
         d_emb (Optional[int]):
             The dimension of the positional embeddings. Must be odd and greater or equal to 3 (time, sine and cosine).
@@ -313,7 +252,7 @@ class ImplicitLongConvolution(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        max_len: int,
+        l_max: int,
         d_emb: int = 3,
         d_hidden: int = 16,
         **kwargs,
@@ -330,7 +269,7 @@ class ImplicitLongConvolution(nn.Module):
         assert (
             d_emb % 2 != 0 and d_emb >= 3
         ), "d_emb must be odd and greater or equal to 3 (time, sine and cosine)"
-        self.pos_emb = PositionalEmbedding(d_emb, max_len)
+        self.pos_emb = PositionalEmbedding(d_emb, l_max)
 
         # final linear layer
         self.mlp = nn.Sequential(
@@ -347,9 +286,9 @@ class ImplicitLongConvolution(nn.Module):
     def forward(self, x: torch.Tensor, *args, **kwargs):
         """
         Args:
-            x: [batch_size, seq_len, hidden_size] tensor
+            x: (b, l, d) tensor
         Returns:
-            y: [batch_size, seq_len, hidden_size] tensor
+            y: (b, l, d) tensor
         """
         x = x.transpose(1, 2)
         k = self.filter(x.shape[-1])
