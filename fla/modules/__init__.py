@@ -14,6 +14,7 @@ from fla.modules.layernorm import (GroupNorm, GroupNormLinear, LayerNorm,
                                    LayerNormLinear, RMSNorm, RMSNormLinear)
 from fla.modules.mlp import GatedMLP
 from fla.modules.rotary import RotaryEmbedding
+from fla.modules.prunable_linear import PrunableLinear
 
 __all__ = [
     'ImplicitLongConvolution', 'LongConvolution', 'ShortConvolution',
@@ -22,5 +23,6 @@ __all__ = [
     'GroupNorm', 'GroupNormLinear', 'LayerNorm', 'LayerNormLinear', 'RMSNorm', 'RMSNormLinear',
     'FusedLayerNormSwishGate', 'FusedLayerNormSwishGateLinear', 'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear',
     'GatedMLP',
-    'RotaryEmbedding'
+    'RotaryEmbedding',
+    'PrunableLinear'
 ]

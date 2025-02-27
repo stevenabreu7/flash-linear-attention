@@ -36,6 +36,15 @@ class HGRNConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
+        # Pruning configuration
+        use_pruning: bool = False,
+        prune_mlp: bool = False,
+        prune_linear: bool = False,
+        target_sparsity: float = 0.8,
+        pruning_start_step: int = 1000,
+        pruning_end_step: int = 10000,
+        pruning_frequency: int = 500,
+        pruning_steps: int = 10,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -59,6 +68,15 @@ class HGRNConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+
+        self.use_pruning = use_pruning
+        self.prune_mlp = prune_mlp
+        self.prune_linear = prune_linear
+        self.target_sparsity = target_sparsity
+        self.pruning_start_step = pruning_start_step
+        self.pruning_end_step = pruning_end_step
+        self.pruning_frequency = pruning_frequency
+        self.pruning_steps = pruning_steps
 
         if attn is not None:
             if not isinstance(attn, Dict):

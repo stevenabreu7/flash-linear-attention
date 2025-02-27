@@ -22,6 +22,8 @@ from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as HGRNMLP
 from fla.modules import RMSNorm
+from fla.modules import PrunableLinear
+from fla.pruning import IterativeMagnitudePruner
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -67,6 +69,27 @@ class HGRNBlock(nn.Module):
             hidden_act=config.hidden_act,
             fuse_swiglu=config.fuse_swiglu
         )
+
+        # replace all linear layers with PrunableLinear layers
+        if config.use_pruning and (config.prune_linear or config.prune_mlp):
+            for name, module in self.named_modules():
+                if name.lower() == "mlp" and not config.prune_mlp:
+                    continue
+                for child_name, child in module.named_children():
+                    if isinstance(child, nn.Linear):
+                        prunable_linear = PrunableLinear(
+                            child.in_features, 
+                            child.out_features,
+                            bias=child.bias is not None,
+                            device=child.weight.device,
+                            dtype=child.weight.dtype
+                        )
+                        # Copy weights and bias
+                        prunable_linear.weight.data.copy_(child.weight.data)
+                        if child.bias is not None:
+                            prunable_linear.bias.data.copy_(child.bias.data)
+                        # Replace the linear layer
+                        setattr(module, child_name, prunable_linear)
 
     def forward(
         self,
@@ -165,6 +188,20 @@ class HGRNModel(HGRNPreTrainedModel):
 
         self.gradient_checkpointing = False
 
+        # Initialize pruner if pruning is enabled
+        self.pruner = None
+        if config.use_pruning:
+            self.pruner = IterativeMagnitudePruner(
+                model=self,
+                target_sparsity=config.target_sparsity,
+                pruning_steps=config.pruning_steps,
+                pruning_start_step=config.pruning_start_step,
+                pruning_end_step=config.pruning_end_step,
+                pruning_frequency=config.pruning_frequency,
+                module_name_filter=lambda name: (config.prune_mlp and 'mlp' in name.lower()) or 
+                                               (config.prune_linear and 'proj' in name.lower())
+            )
+
         self.post_init()
 
     def get_input_embeddings(self):
@@ -260,6 +297,11 @@ class HGRNModel(HGRNPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_attns
         )
+
+    # Add a method to update pruning masks during training
+    def update_pruning(self, step):
+        if self.pruner is not None:
+            self.pruner.step(step)
 
 
 class HGRNForCausalLM(HGRNPreTrainedModel, GenerationMixin):
