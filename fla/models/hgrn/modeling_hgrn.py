@@ -194,7 +194,6 @@ class HGRNModel(HGRNPreTrainedModel):
             self.pruner = IterativeMagnitudePruner(
                 model=self,
                 target_sparsity=config.target_sparsity,
-                pruning_steps=config.pruning_steps,
                 pruning_start_step=config.pruning_start_step,
                 pruning_end_step=config.pruning_end_step,
                 pruning_frequency=config.pruning_frequency,

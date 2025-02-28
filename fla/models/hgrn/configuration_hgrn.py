@@ -44,7 +44,6 @@ class HGRNConfig(PretrainedConfig):
         pruning_start_step: int = 1000,
         pruning_end_step: int = 10000,
         pruning_frequency: int = 500,
-        pruning_steps: int = 10,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -76,7 +75,6 @@ class HGRNConfig(PretrainedConfig):
         self.pruning_start_step = pruning_start_step
         self.pruning_end_step = pruning_end_step
         self.pruning_frequency = pruning_frequency
-        self.pruning_steps = pruning_steps
 
         if attn is not None:
             if not isinstance(attn, Dict):

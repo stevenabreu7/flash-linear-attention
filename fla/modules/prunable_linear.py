@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class StraightThroughEstimator(torch.autograd.Function):
@@ -37,12 +36,15 @@ class PrunableLinear(nn.Linear):
     ):
         super().__init__(in_features, out_features, bias, device, dtype)
         
-        # Initialize pruning mask
-        self.register_buffer('mask', torch.ones_like(self.weight))
+        # Create mask as a parameter (no gradients) so it follows the same distribution pattern as weights
+        self.mask = nn.Parameter(torch.ones_like(self.weight), requires_grad=False)
         self.pruning_active = False
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.pruning_active:
+            # Make sure mask has same dtype as weight
+            self.update_mask_dtype()
+
             # Apply mask with STE in forward pass
             masked_weight = StraightThroughEstimator.apply(self.weight, self.mask)
             return F.linear(input, masked_weight, self.bias)
@@ -59,4 +61,11 @@ class PrunableLinear(nn.Linear):
             "sparsity": sparsity,
             "pruned_params": (self.mask == 0).sum().item(),
             "total_params": self.mask.numel()
-        } 
+        }
+    
+    def update_mask_dtype(self):
+        """Ensure mask has the same dtype as weight"""
+        if self.mask.dtype != self.weight.dtype:
+            self.mask.data = self.mask.data.to(dtype=self.weight.dtype)
+            return True
+        return False

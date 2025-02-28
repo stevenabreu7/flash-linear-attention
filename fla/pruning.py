@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import List, Dict, Optional, Union, Callable
 from transformers.utils import logging
+from fla.modules.prunable_linear import PrunableLinear
 
 logger = logging.get_logger(__name__)
 
@@ -11,7 +12,6 @@ class IterativeMagnitudePruner:
         self,
         model: nn.Module,
         target_sparsity: float = 0.5,
-        pruning_steps: int = 10,
         pruning_start_step: int = 1000,
         pruning_end_step: int = 10000,
         pruning_frequency: int = 1000,
@@ -24,7 +24,6 @@ class IterativeMagnitudePruner:
         Args:
             model: The model to prune
             target_sparsity: Final sparsity target (0.0-1.0)
-            pruning_steps: Number of pruning steps to reach target sparsity
             pruning_start_step: Training step to start pruning
             pruning_end_step: Training step to end pruning ramp-up
             pruning_frequency: How often to update pruning masks (in steps)
@@ -33,7 +32,6 @@ class IterativeMagnitudePruner:
         """
         self.model = model
         self.target_sparsity = target_sparsity
-        self.pruning_steps = pruning_steps
         self.pruning_start_step = pruning_start_step
         self.pruning_end_step = pruning_end_step
         self.pruning_frequency = pruning_frequency
@@ -63,7 +61,10 @@ class IterativeMagnitudePruner:
         if (training_step < self.pruning_start_step or 
             training_step > self.pruning_end_step or
             (training_step - self.pruning_start_step) % self.pruning_frequency != 0):
+            logger.debug(f"Skipping pruning step {training_step} - not in pruning range")
             return
+        
+        logger.debug(f"Pruning step {training_step} is in pruning range")
         
         # Calculate target sparsity for this step
         progress = min(1.0, (training_step - self.pruning_start_step) / 
@@ -71,8 +72,9 @@ class IterativeMagnitudePruner:
         step_sparsity = self.target_sparsity * (1.0 - (1.0 - progress) ** self.polynomial_degree)
 
         if step_sparsity <= self.current_sparsity:
+            logger.debug(f"Skipping pruning step {training_step} - target sparsity {step_sparsity:.4f} already reached: {self.current_sparsity:.4f}")
             return
-            
+
         self.current_sparsity = step_sparsity
         logger.info(f"Updating pruning masks to target sparsity: {step_sparsity:.4f}")
         
@@ -89,20 +91,23 @@ class IterativeMagnitudePruner:
             self._log_pruning_stats()
     
     def _update_module_masks(self, module, sparsity):
-        """Update pruning masks for a single module based on weight magnitudes"""
-        # Handle PrunableLinear
-        if hasattr(module, 'mask') and hasattr(module, 'weight'):
-            self._update_mask(module.weight, module.mask, sparsity)
-        
-        # Handle PrunableGatedMLP
-        if hasattr(module, 'gate_mask'):
-            self._update_mask(module.gate_proj.weight, module.gate_mask, sparsity)
-            
-        if hasattr(module, 'up_mask'):
-            self._update_mask(module.up_proj.weight, module.up_mask, sparsity)
-            
-        if hasattr(module, 'down_mask'):
-            self._update_mask(module.down_proj.weight, module.down_mask, sparsity)
+        """Update masks for all prunable linear layers in a module"""
+        for name, child in module.named_modules():
+            if isinstance(child, PrunableLinear):
+                # Ensure mask has correct dtype
+                child.update_mask_dtype()
+                
+                # Check tensor types and handle accordingly
+                weight = child.weight
+                mask = child.mask
+                weight_data = weight._local_tensor if hasattr(weight, '_local_tensor') else weight
+                mask_data = mask._local_tensor if hasattr(mask, '_local_tensor') else mask
+                
+                # Update the mask based on weight magnitudes
+                self._update_mask(weight_data, mask_data, sparsity)
+                
+                # Enable pruning on this layer
+                child.enable_pruning(True)
     
     def _update_mask(self, weight, mask, sparsity):
         """Update a single mask based on weight magnitudes"""
@@ -119,8 +124,8 @@ class IterativeMagnitudePruner:
             threshold = torch.kthvalue(magnitude.view(-1), k).values
             
             # Update mask (keep weights with magnitude > threshold)
-            new_mask = (magnitude > threshold).float()
-            mask.copy_(new_mask)
+            new_mask = (magnitude > threshold).to(dtype=mask.dtype, device=mask.device)
+            mask.data.copy_(new_mask)
     
     def _log_pruning_stats(self, detailed: bool = False):
         """Log pruning statistics"""
@@ -143,62 +148,40 @@ class IterativeMagnitudePruner:
                 
                 # Count parameters for PrunableLinear
                 if hasattr(module, 'mask'):
-                    total_params += module.mask.numel()
-                    pruned_params += (module.mask == 0).sum().item()
-                
-                # Count parameters for PrunableGatedMLP
-                if hasattr(module, 'gate_mask'):
-                    total_params += module.gate_mask.numel()
-                    pruned_params += (module.gate_mask == 0).sum().item()
-                if hasattr(module, 'up_mask'):
-                    total_params += module.up_mask.numel()
-                    pruned_params += (module.up_mask == 0).sum().item()
-                if hasattr(module, 'down_mask'):
-                    total_params += module.down_mask.numel()
-                    pruned_params += (module.down_mask == 0).sum().item()
+                    mask_numel = module.mask.numel()
+                    # Handle DTensor case
+                    if hasattr(module.mask, '_local_tensor'):
+                        # Get local counts
+                        local_mask = module.mask._local_tensor
+                        local_zeros = (local_mask == 0).sum().item()
+                        local_total = local_mask.numel()
+                        
+                        # Gather counts from all processes
+                        zeros_tensor = torch.tensor([local_zeros], dtype=torch.float64, device=local_mask.device)
+                        total_tensor = torch.tensor([local_total], dtype=torch.float64, device=local_mask.device)
+                        
+                        torch.distributed.all_reduce(zeros_tensor, op=torch.distributed.ReduceOp.SUM)
+                        torch.distributed.all_reduce(total_tensor, op=torch.distributed.ReduceOp.SUM)
+                        
+                        pruned_params += zeros_tensor.item() if module.pruning_active else 0
+                        total_params += total_tensor.item()
+                    else:
+                        total_params += mask_numel
+                        pruned_params += (module.mask == 0).sum().item() if module.pruning_active else 0
         
-        overall_sparsity = None if total_params <= 0 else pruned_params / total_params
+        overall_sparsity = 0.0 if total_params <= 0 else pruned_params / total_params
         return overall_sparsity, total_params, pruned_params, full_state
-
-
-# Add helper functions for saving and loading pruned models
-def save_pruned_model(model, path):
-    """Save model with pruning masks"""
-    # Save model state dict
-    state_dict = model.state_dict()
-    torch.save(state_dict, path)
-
-
-def load_pruned_model(model, path):
-    """Load model with pruning masks and activate pruning"""
-    # Load state dict
-    state_dict = torch.load(path)
-    model.load_state_dict(state_dict)
-    
-    # Enable pruning on all prunable modules based on config
-    if hasattr(model.config, 'use_pruning') and model.config.use_pruning:
-        for name, module in model.named_modules():
-            if hasattr(module, 'enable_pruning'):
-                module.enable_pruning(True)
-                
-        logger.info("Enabled pruning on loaded model") 
 
 
 def setup_pruning_for_hgrn(model, args):
     """
     Setup pruning for HGRN model based on training arguments
-    
-    Args:
-        model: The HGRN model
-        args: Training arguments with pruning configuration
     """
     if not hasattr(model.config, 'use_pruning') or not model.config.use_pruning:
         return None
     
-    # Pruning is configured in the model config
     logger.info(f"Setting up pruning with target sparsity {model.config.target_sparsity}")
     
-    # Enable pruning on all prunable modules
     for name, module in model.named_modules():
         if hasattr(module, 'enable_pruning'):
             module.enable_pruning(True)
@@ -208,12 +191,8 @@ def setup_pruning_for_hgrn(model, args):
 
 
 def update_pruning(model, step):
-    """
-    Update pruning masks during training
-    
-    Args:
-        model: The model with pruning
-        step: Current training step
-    """
-    if hasattr(model, 'update_pruning'):
-        model.update_pruning(step) 
+    """Update pruning masks for a model that supports pruning"""
+    if hasattr(model, 'pruner') and model.pruner is not None:
+        model.pruner.step(step)
+    elif hasattr(model, 'update_pruning'):
+        model.update_pruning(step)
