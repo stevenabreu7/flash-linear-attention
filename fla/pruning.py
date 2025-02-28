@@ -196,3 +196,44 @@ def update_pruning(model, step):
         model.pruner.step(step)
     elif hasattr(model, 'update_pruning'):
         model.update_pruning(step)
+
+
+def calculate_sparsity(model, model_parts, pp_enabled: bool):
+    if pp_enabled:
+        # For pipeline parallel, update each model part
+        current_target_sparsity = []
+        current_sparsity, nparams, nzparams = [], [], []
+        for model_part in model_parts:
+            pruner = model_part.model.pruner if hasattr(model_part, 'model') else model_part.pruner
+            current_target_sparsity_i = pruner.current_sparsity
+            current_sparsity_i, nparams_i, nzparams_i, _ = pruner.get_pruning_stats()
+            current_sparsity.append(current_sparsity_i)
+            nparams.append(nparams_i)
+            nzparams.append(nzparams_i)
+            current_target_sparsity.append(current_target_sparsity_i)
+        if len(set(current_target_sparsity)) != 1:
+            logger.warning(f"Current target sparsity is not the same for all model parts: {current_target_sparsity}")
+        current_target_sparsity = sum(current_target_sparsity) / len(current_target_sparsity)
+        nparams = sum(nparams)
+        nzparams = sum(nzparams)
+        current_sparsity = sum(current_sparsity) / len(current_sparsity)
+    else:
+        pruner = model.model.pruner if hasattr(model, 'model') else model.pruner
+        current_target_sparsity = pruner.current_sparsity
+        current_sparsity, nparams, nzparams, _ = pruner.get_pruning_stats()
+    return current_sparsity, current_target_sparsity, nparams, nzparams
+
+
+def update_sparsity(model, model_parts, pp_enabled: bool, step: int):
+    if pp_enabled:
+        # For pipeline parallel, update each model part
+        for model_part in model_parts:
+            if hasattr(model_part, 'model'):
+                update_pruning(model_part.model, step)
+            else:
+                update_pruning(model_part, step)
+    else:
+        if hasattr(model, 'model'):
+            update_pruning(model.model, step)
+        else:
+            update_pruning(model, step)
