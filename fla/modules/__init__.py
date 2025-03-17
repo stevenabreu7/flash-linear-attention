@@ -15,13 +15,15 @@ from fla.modules.layernorm import (GroupNorm, GroupNormLinear, LayerNorm,
 from fla.modules.mlp import GatedMLP
 from fla.modules.rotary import RotaryEmbedding
 from fla.modules.prunable_linear import PrunableLinear
+from fla.modules.dyt_norm import DyT, FusedDyTSwishGate
 
 __all__ = [
     'ImplicitLongConvolution', 'LongConvolution', 'ShortConvolution',
     'BitLinear', 'FusedBitLinear',
     'FusedCrossEntropyLoss', 'FusedLinearCrossEntropyLoss', 'FusedKLDivLoss',
-    'GroupNorm', 'GroupNormLinear', 'LayerNorm', 'LayerNormLinear', 'RMSNorm', 'RMSNormLinear',
+    'GroupNorm', 'GroupNormLinear', 'LayerNorm', 'LayerNormLinear', 'RMSNorm', 'RMSNormLinear', 'DyT',
     'FusedLayerNormSwishGate', 'FusedLayerNormSwishGateLinear', 'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear',
+    'FusedDyTSwishGate',
     'GatedMLP',
     'RotaryEmbedding',
     'PrunableLinear'
