@@ -24,6 +24,7 @@ from fla.modules import GatedMLP as HGRNMLP
 from fla.modules import RMSNorm, DyT
 from fla.modules import PrunableLinear
 from fla.pruning import IterativeMagnitudePruner
+from fla.convert_dyt_norm import convert_rmsnorm_to_dyt
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -200,6 +201,12 @@ class HGRNModel(HGRNPreTrainedModel):
                 module_name_filter=lambda name: (config.prune_mlp and 'mlp' in name.lower()) or 
                                                (config.prune_linear and 'proj' in name.lower())
             )
+            
+        # Apply DyT conversion if enabled
+        if getattr(config, "use_dyt", False):
+            # Convert all RMSNorm layers to DyT
+            convert_rmsnorm_to_dyt(self, alpha_init_value=config.alpha_init_value)
+            logger.info(f"Applied DyT normalization with alpha_init={config.alpha_init_value}")
 
         self.post_init()
 
