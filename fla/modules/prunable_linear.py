@@ -75,9 +75,9 @@ class PrunableLinear(nn.Linear):
         
     def fuse_mask(self):
         """
-        Fuse mask with weights to create a normal-looking model.
-        This applies the pruning mask permanently to the weights and disables the masking operation.
-        Stores original weights to allow unfusing later.
+        Fuse mask with weights to create a normal-looking model and remove mask tensor.
+        This applies the pruning mask permanently to the weights, removes the mask parameter,
+        and disables the masking operation so the model behaves like a standard nn.Linear.
         """
         if self.is_fused:
             return
@@ -85,13 +85,23 @@ class PrunableLinear(nn.Linear):
         with torch.no_grad():
             # Store original weights for possible unfusing later
             self.original_weights = self.weight.data.clone()
+            # Also store mask for unfusing
+            if hasattr(self, 'mask'):
+                self.stored_mask = self.mask.data.clone()
             
             # Apply mask to weights directly
-            self.weight.data = self.weight.data * self.mask.data
+            if hasattr(self, 'mask'):
+                self.weight.data = self.weight.data * self.mask.data
+                
+                # Remove mask parameter from state dict by deleting it
+                delattr(self, 'mask')
+                
+                # Replace it with None to prevent attribute errors in other code
+                self.mask = None
             
             # Mark as fused
             self.is_fused = True
-        
+
     def unfuse_mask(self):
         """
         Restore original weights and re-enable masking.
@@ -104,6 +114,14 @@ class PrunableLinear(nn.Linear):
             # Restore original weights
             self.weight.data.copy_(self.original_weights)
             self.original_weights = None
+            
+            # Restore mask as a parameter
+            if self.mask is None and hasattr(self, 'stored_mask'):
+                # Create new parameter with stored mask data
+                self.mask = nn.Parameter(self.stored_mask, requires_grad=False)
+                delattr(self, 'stored_mask')
+            else:
+                raise ValueError("Mask is not None or stored_mask is not present - cannot unfuse")
             
             # Mark as unfused
             self.is_fused = False
