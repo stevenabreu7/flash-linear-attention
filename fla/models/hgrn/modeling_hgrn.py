@@ -21,7 +21,7 @@ from fla.models.hgrn.configuration_hgrn import HGRNConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as HGRNMLP
-from fla.modules import RMSNorm
+from fla.modules import RMSNorm, DyT
 from fla.modules import PrunableLinear
 from fla.pruning import IterativeMagnitudePruner
 

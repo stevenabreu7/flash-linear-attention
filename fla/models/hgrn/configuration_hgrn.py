@@ -25,6 +25,8 @@ class HGRNConfig(PretrainedConfig):
         hidden_act: str = "swish",
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-6,
+        norm_type: str = "rms_norm",  # Options: "rms_norm", "dyt"
+        alpha_init_value: float = 0.5,  # Initial value for DyT alpha parameter
         attn: Optional[Dict] = None,
         use_cache: bool = True,
         pad_token_id: int = None,
@@ -67,7 +69,12 @@ class HGRNConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+        
+        # Normalization configuration
+        self.norm_type = norm_type
+        self.alpha_init_value = alpha_init_value
 
+        # Pruning configuration
         self.use_pruning = use_pruning
         self.prune_mlp = prune_mlp
         self.prune_linear = prune_linear
