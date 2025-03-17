@@ -237,3 +237,45 @@ def update_sparsity(model, model_parts, pp_enabled: bool, step: int):
             update_pruning(model.model, step)
         else:
             update_pruning(model, step)
+
+
+def fuse_pruning_masks(model):
+    """
+    Fuse pruning masks with weights for all prunable layers in the model.
+    This creates a normal-looking model where pruned weights are actually zero.
+    
+    Args:
+        model: The model containing PrunableLinear layers
+    
+    Returns:
+        int: Number of prunable layers that were fused
+    """
+    fused_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, PrunableLinear):
+            module.fuse_mask()
+            fused_count += 1
+    
+    logger.info(f"Fused pruning masks in {fused_count} layers")
+    return fused_count
+
+
+def unfuse_pruning_masks(model):
+    """
+    Unfuse pruning masks from weights for all prunable layers in the model.
+    This restores the original weights and re-enables the masking operation for training.
+    
+    Args:
+        model: The model containing PrunableLinear layers
+    
+    Returns:
+        int: Number of prunable layers that were unfused
+    """
+    unfused_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, PrunableLinear):
+            module.unfuse_mask()
+            unfused_count += 1
+    
+    logger.info(f"Unfused pruning masks in {unfused_count} layers")
+    return unfused_count

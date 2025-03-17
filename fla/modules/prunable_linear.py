@@ -39,9 +39,12 @@ class PrunableLinear(nn.Linear):
         # Create mask as a parameter (no gradients) so it follows the same distribution pattern as weights
         self.mask = nn.Parameter(torch.ones_like(self.weight), requires_grad=False)
         self.pruning_active = False
+        # Store original weights for unfusing
+        self.original_weights = None
+        self.is_fused = False
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if self.pruning_active:
+        if self.pruning_active and not self.is_fused:
             # Make sure mask has same dtype as weight
             self.update_mask_dtype()
 
@@ -69,3 +72,38 @@ class PrunableLinear(nn.Linear):
             self.mask.data = self.mask.data.to(dtype=self.weight.dtype)
             return True
         return False
+        
+    def fuse_mask(self):
+        """
+        Fuse mask with weights to create a normal-looking model.
+        This applies the pruning mask permanently to the weights and disables the masking operation.
+        Stores original weights to allow unfusing later.
+        """
+        if self.is_fused:
+            return
+            
+        with torch.no_grad():
+            # Store original weights for possible unfusing later
+            self.original_weights = self.weight.data.clone()
+            
+            # Apply mask to weights directly
+            self.weight.data = self.weight.data * self.mask.data
+            
+            # Mark as fused
+            self.is_fused = True
+        
+    def unfuse_mask(self):
+        """
+        Restore original weights and re-enable masking.
+        This is useful if you want to continue training with pruning after inference.
+        """
+        if not self.is_fused or self.original_weights is None:
+            return
+            
+        with torch.no_grad():
+            # Restore original weights
+            self.weight.data.copy_(self.original_weights)
+            self.original_weights = None
+            
+            # Mark as unfused
+            self.is_fused = False
