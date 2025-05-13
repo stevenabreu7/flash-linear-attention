@@ -176,26 +176,92 @@ class IterativeMagnitudePruner:
 def setup_pruning_for_hgrn(model, args):
     """
     Setup pruning for HGRN model based on training arguments
+
+    Args:
+        model: The HGRN model to set up pruning for
+        args: Training arguments
+
+    Returns:
+        Pruner object if pruning is enabled, None otherwise
     """
     if not hasattr(model.config, 'use_pruning') or not model.config.use_pruning:
         return None
-    
-    logger.info(f"Setting up pruning with target sparsity {model.config.target_sparsity}")
-    
+
+    # Determine pruning method (magnitude by default, rigl if specified)
+    pruning_method = getattr(model.config, 'pruning_method', 'magnitude')
+    logger.info(f"Setting up pruning with method '{pruning_method}' and target sparsity {model.config.target_sparsity}")
+
+    # Enable pruning on all prunable modules
     for name, module in model.named_modules():
         if hasattr(module, 'enable_pruning'):
             module.enable_pruning(True)
-            logger.info(f"Enabled pruning for module {name}")
-    
+            logger.debug(f"Enabled pruning for module {name}")
+
+    # Create pruner based on method
+    if pruning_method == 'rigl':
+        from fla.rigl_pruning import RigLPruner
+
+        # Get RIGL-specific parameters
+        gradient_accumulation_n = getattr(model.config, 'rigl_gradient_accumulation', 1)
+        alpha = getattr(model.config, 'rigl_alpha', 0.3)
+        ignore_linear_layers = getattr(model.config, 'rigl_ignore_linear_layers', False)
+
+        logger.info(f"Using RigL pruning with alpha={alpha}, grad_accumulation={gradient_accumulation_n}")
+
+        pruner = RigLPruner(
+            model=model,
+            target_sparsity=model.config.target_sparsity,
+            pruning_start_step=model.config.pruning_start_step,
+            pruning_end_step=model.config.pruning_end_step,
+            pruning_frequency=model.config.pruning_frequency,
+            gradient_accumulation_n=gradient_accumulation_n,
+            alpha=alpha,
+            ignore_linear_layers=ignore_linear_layers
+        )
+    else:
+        # Default to magnitude pruning
+        pruner = IterativeMagnitudePruner(
+            model=model,
+            target_sparsity=model.config.target_sparsity,
+            pruning_start_step=model.config.pruning_start_step,
+            pruning_end_step=model.config.pruning_end_step,
+            pruning_frequency=model.config.pruning_frequency,
+            polynomial_degree=getattr(model.config, 'pruning_polynomial_degree', 3)
+        )
+
+    # Attach pruner to model
+    model.pruner = pruner
     return model.pruner
 
 
-def update_pruning(model, step):
-    """Update pruning masks for a model that supports pruning"""
+def update_pruning(model, step, optimizer=None):
+    """Update pruning masks for a model that supports pruning
+
+    Args:
+        model: The model to update pruning for
+        step: Current training step
+        optimizer: Optimizer (required for RIGL)
+
+    Returns:
+        bool: True if normal optimizer step should be performed
+    """
+    # Check if model has pruner
     if hasattr(model, 'pruner') and model.pruner is not None:
-        model.pruner.step(step)
+        # RigL pruners need optimizer for momentum reset
+        if hasattr(model.pruner, 'accumulate_gradients'):
+            # RIGL pruner
+            return model.pruner.step(step, optimizer)
+        else:
+            # Magnitude pruner
+            model.pruner.step(step)
+            return True
     elif hasattr(model, 'update_pruning'):
+        # Legacy method
         model.update_pruning(step)
+        return True
+
+    # Default: allow optimizer step
+    return True
 
 
 def calculate_sparsity(model, model_parts, pp_enabled: bool):
@@ -224,19 +290,37 @@ def calculate_sparsity(model, model_parts, pp_enabled: bool):
     return current_sparsity, current_target_sparsity, nparams, nzparams
 
 
-def update_sparsity(model, model_parts, pp_enabled: bool, step: int):
+def update_sparsity(model, model_parts, pp_enabled: bool, step: int, optimizer=None):
+    """Update sparsity for a model or model parts
+
+    Args:
+        model: The model or model container
+        model_parts: List of model parts for pipeline parallel
+        pp_enabled: Whether pipeline parallel is enabled
+        step: Current training step
+        optimizer: Optimizer (required for RIGL)
+
+    Returns:
+        bool: True if normal optimizer step should be performed
+    """
+    perform_opt_step = True
+
     if pp_enabled:
         # For pipeline parallel, update each model part
         for model_part in model_parts:
             if hasattr(model_part, 'model'):
-                update_pruning(model_part.model, step)
+                result = update_pruning(model_part.model, step, optimizer)
+                perform_opt_step = perform_opt_step and result
             else:
-                update_pruning(model_part, step)
+                result = update_pruning(model_part, step, optimizer)
+                perform_opt_step = perform_opt_step and result
     else:
         if hasattr(model, 'model'):
-            update_pruning(model.model, step)
+            perform_opt_step = update_pruning(model.model, step, optimizer)
         else:
-            update_pruning(model, step)
+            perform_opt_step = update_pruning(model, step, optimizer)
+
+    return perform_opt_step
 
 
 def fuse_pruning_masks(model):
